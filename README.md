@@ -6,6 +6,16 @@
 
 PI仓库: https://github.com/earendil-works/pi
 
+## 安装
+1. 打开 [JSOS](https://jsos.dev)
+2. 右键桌面->安装应用->Github安装
+3. 粘贴该项目地址，安装
+
+> 第一次打开应用，会先安装依赖，稍等一会即可。 后续再启动将会跳过已安装依赖，更快加载。
+
+## 截图
+![主界面](screenshots/main.png)
+
 ## 说明
 pi基于ts编写，所以可以通过[JSOS](https://jsos.dev)平台，运行在浏览器端，但官方的源码有一些写法并不适配JSOS所使用的NodeJS版本（v22.22.3），所以`cli.sh`里有一个修复代码的操作。
 
