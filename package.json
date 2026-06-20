@@ -1,0 +1,27 @@
+{
+    "name": "pi-coding-agent",
+    "version": "0.79.8",
+    "type": "module",
+    "scripts": {
+      "git:tag": "node -e \"const v=require('./package.json').version;const{execSync}=require('child_process');execSync('git tag v'+v+' && git push origin v'+v,{stdio:'inherit'});console.log('Tagged and pushed v'+v)\""
+    },
+    "dependencies": {
+  		"@earendil-works/pi-coding-agent": "0.79.8"
+  	},
+   "repository": {
+     "type": "git",
+     "url": "https://github.com/jsos-dev/dev.pi.coding-agent"
+   },
+   "bugs": {
+     "url": "https://github.com/jsos-dev/dev.pi.coding-agent/issues"
+   },
+    "jsos": {
+        "id": "dev.pi.coding-agent",
+        "name": "Pi Agent",
+        "description": { "en": "Pi is a minimal agent harness.", "zh-CN": "Pi 是一个极简的编程代理框架。" },
+        "type": "cli",
+        "startCommand": "/bin/jsh cli.sh",
+        "installCommand": "pnpm install",
+        "icon": "icon.svg"
+    }
+}
