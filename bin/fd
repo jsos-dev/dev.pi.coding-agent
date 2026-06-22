@@ -1,0 +1,2321 @@
+#!/usr/bin/env node
+'use strict';
+
+// ============================================================
+// fd.js - Node.js implementation of fd file finder
+// Generated from src/ modules by build.sh
+// ============================================================
+
+const fs = require('fs');
+const path = require('path');
+const { spawn } = require('child_process');
+const os = require('os');
+const process = require('process');
+const { Worker } = require('worker_threads');
+
+// ============================================================
+// Simple Module System
+// ============================================================
+const moduleCache = {};
+const moduleExports = {};
+
+function requireModule(name) {
+  if (moduleCache[name]) return moduleCache[name];
+  if (!moduleFactories[name]) throw new Error(`Module '${name}' not found`);
+  const mod = { exports: {} };
+  moduleFactories[name](mod, mod.exports);
+  moduleCache[name] = mod.exports;
+  return mod.exports;
+}
+
+const moduleFactories = {};
+
+
+  // Module: filesystem.js
+  moduleFactories['filesystem'] = function(module, exports) {
+'use strict';
+
+const os = require('os');
+const path = require('path');
+const fs = require('fs');
+
+const isWindows = process.platform === 'win32';
+const MAIN_SEPARATOR = path.sep;
+
+function pathAbsoluteForm(p) {
+  if (path.isAbsolute(p)) {
+    return path.resolve(p);
+  }
+  return path.resolve(process.cwd(), p);
+}
+
+function absolutePath(p) {
+  let abs = pathAbsoluteForm(p);
+  if (isWindows) {
+    abs = abs.replace(/^\\\\\?\\/, '');
+  }
+  return abs;
+}
+
+function isExistingDirectory(p) {
+  try {
+    const stat = fs.statSync(p, { throwIfNoEntry: false });
+    return stat !== undefined && stat.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function isEmpty(entry) {
+  try {
+    if (entry.isDirectory()) {
+      const files = fs.readdirSync(entry.path);
+      return files.length === 0;
+    }
+    return entry.size === 0;
+  } catch {
+    return false;
+  }
+}
+
+function isBlockDevice(stat) {
+  if (isWindows) return false;
+  return stat.isBlockDevice ? stat.isBlockDevice() : false;
+}
+
+function isCharDevice(stat) {
+  if (isWindows) return false;
+  return stat.isCharacterDevice ? stat.isCharacterDevice() : false;
+}
+
+function isSocket(stat) {
+  if (isWindows) return false;
+  return stat.isSocket ? stat.isSocket() : false;
+}
+
+function isPipe(stat) {
+  if (isWindows) return false;
+  return stat.isFIFO ? stat.isFIFO() : false;
+}
+
+function osstrToBytes(input) {
+  if (typeof input === 'string') {
+    return Buffer.from(input);
+  }
+  return Buffer.from(input);
+}
+
+function stripCurrentDir(p) {
+  if (p.startsWith('./')) {
+    return p.slice(2);
+  }
+  return p;
+}
+
+function defaultPathSeparator() {
+  if (isWindows) {
+    const msys = process.env.MSYSTEM;
+    if (msys && (msys.startsWith('MINGW') || msys.startsWith('MSYS'))) {
+      return '/';
+    }
+  }
+  return null;
+}
+
+function getExtension(filename) {
+  const dotIndex = filename.lastIndexOf('.');
+  if (dotIndex > 0) {
+    return filename.slice(dotIndex + 1);
+  }
+  return '';
+}
+
+module.exports = {
+  isWindows,
+  MAIN_SEPARATOR,
+  pathAbsoluteForm,
+  absolutePath,
+  isExistingDirectory,
+  isEmpty,
+  isBlockDevice,
+  isCharDevice,
+  isSocket,
+  isPipe,
+  osstrToBytes,
+  stripCurrentDir,
+  defaultPathSeparator,
+  getExtension,
+};
+  };
+
+  // Module: error.js
+  moduleFactories['error'] = function(module, exports) {
+'use strict';
+
+function printError(msg) {
+  process.stderr.write(`[fd error]: ${msg}\n`);
+}
+
+module.exports = { printError };
+  };
+
+  // Module: exit_codes.js
+  moduleFactories['exit_codes'] = function(module, exports) {
+'use strict';
+
+const process = require('process');
+
+const ExitCode = {
+  Success: 0,
+  GeneralError: 1,
+  KilledBySigint: 130,
+};
+
+function exit(exitCode) {
+  if (exitCode === ExitCode.KilledBySigint) {
+    process.removeAllListeners('SIGINT');
+    process.kill(process.pid, 'SIGINT');
+  } else {
+    process.exit(exitCode);
+  }
+}
+
+function mergeExitcodes(results) {
+  for (const code of results) {
+    if (code !== ExitCode.Success) {
+      return ExitCode.GeneralError;
+    }
+  }
+  return ExitCode.Success;
+}
+
+module.exports = { ExitCode, exit, mergeExitcodes };
+  };
+
+  // Module: regex_helper.js
+  moduleFactories['regex_helper'] = function(module, exports) {
+'use strict';
+
+function patternHasUppercaseChar(pattern) {
+  let inClass = false;
+  let escaped = false;
+
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+
+    if (escaped) {
+      escaped = false;
+      if (ch >= 'A' && ch <= 'Z') return true;
+      continue;
+    }
+
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (ch === '[') {
+      inClass = true;
+      continue;
+    }
+
+    if (ch === ']' && inClass) {
+      inClass = false;
+      continue;
+    }
+
+    if (!inClass && ch >= 'A' && ch <= 'Z') {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function patternMatchesStringsWithLeadingDot(pattern) {
+  return /^\^\\\./.test(pattern) || /^\^\(\?:\\\.\)/.test(pattern);
+}
+
+module.exports = { patternHasUppercaseChar, patternMatchesStringsWithLeadingDot };
+  };
+
+  // Module: fmt.js
+  moduleFactories['fmt'] = function(module, exports) {
+'use strict';
+
+const path = require('path');
+const { MAIN_SEPARATOR } = requireModule('filesystem');
+
+const PLACEHOLDERS = {
+  '{{': 'LBRACE',
+  '}}': 'RBRACE',
+  '{}': 'PATH',
+  '{/}': 'BASENAME',
+  '{//}': 'PARENT',
+  '{.}': 'NOEXT',
+  '{/.}': 'BASENAME_NOEXT',
+};
+
+const PLACEHOLDER_REGEX = /\{\{|}}|\{\/\}|\{\/\/\}|\{\/\.\}|\{\.\}|\{\}/g;
+
+function parse(fmt) {
+  if (!fmt) {
+    return { type: 'text', value: '' };
+  }
+
+  const tokens = [];
+  let lastIndex = 0;
+  let match;
+
+  PLACEHOLDER_REGEX.lastIndex = 0;
+
+  while ((match = PLACEHOLDER_REGEX.exec(fmt)) !== null) {
+    const pos = match.index;
+
+    if (pos > lastIndex) {
+      tokens.push({ type: 'text', value: fmt.slice(lastIndex, pos) });
+    }
+
+    const matched = match[0];
+
+    if (matched === '{{') {
+      tokens.push({ type: 'text', value: '{' });
+    } else if (matched === '}}') {
+      tokens.push({ type: 'text', value: '}' });
+    } else if (matched === '{}') {
+      tokens.push({ type: 'placeholder' });
+    } else if (matched === '{/}') {
+      tokens.push({ type: 'basename' });
+    } else if (matched === '{//}') {
+      tokens.push({ type: 'parent' });
+    } else if (matched === '{.}') {
+      tokens.push({ type: 'noext' });
+    } else if (matched === '{/.}') {
+      tokens.push({ type: 'basename_noext' });
+    }
+
+    lastIndex = pos + matched.length;
+  }
+
+  if (lastIndex < fmt.length) {
+    tokens.push({ type: 'text', value: fmt.slice(lastIndex) });
+  }
+
+  const hasPlaceholders = tokens.some((t) => t.type !== 'text');
+
+  if (!hasPlaceholders) {
+    return { type: 'text', value: fmt };
+  }
+
+  return { type: 'tokens', tokens };
+}
+
+function basename(filePath) {
+  const base = path.basename(filePath);
+  return base || filePath;
+}
+
+function dirname(filePath) {
+  const dir = path.dirname(filePath);
+  if (dir === '.') {
+    return '.';
+  }
+  return dir;
+}
+
+function removeExtension(filePath) {
+  const ext = path.extname(filePath);
+  const base = path.basename(filePath);
+  const dir = path.dirname(filePath);
+  const stem = base.slice(0, base.length - ext.length);
+
+  if (dir === '.') {
+    return stem;
+  }
+  return dir + path.sep + stem;
+}
+
+function basenameNoExt(filePath) {
+  const base = path.basename(filePath);
+  const ext = path.extname(filePath);
+  return base.slice(0, base.length - ext.length);
+}
+
+function replaceSeparator(p, separator) {
+  if (!separator || separator === MAIN_SEPARATOR) {
+    return p;
+  }
+  return p.split(MAIN_SEPARATOR).join(separator);
+}
+
+function generate(template, filePath, pathSeparator) {
+  if (template.type === 'text') {
+    return template.value;
+  }
+
+  let result = '';
+
+  for (const token of template.tokens) {
+    switch (token.type) {
+      case 'text':
+        result += token.value;
+        break;
+      case 'placeholder':
+        result += replaceSeparator(filePath, pathSeparator);
+        break;
+      case 'basename':
+        result += path.basename(filePath);
+        break;
+      case 'parent':
+        result += replaceSeparator(dirname(filePath), pathSeparator);
+        break;
+      case 'noext':
+        result += replaceSeparator(removeExtension(filePath), pathSeparator);
+        break;
+      case 'basename_noext':
+        result += basenameNoExt(filePath);
+        break;
+    }
+  }
+
+  return result;
+}
+
+module.exports = { parse, generate, replaceSeparator };
+  };
+
+  // Module: filter/size.js
+  moduleFactories['filter_size'] = function(module, exports) {
+'use strict';
+
+const SIZE_REGEX = /^(?<sign>[+-]?)(?<num>\d+)(?<unit>b|[kmgt]i?b?)$/i;
+
+const UNIT_MULTIPLIERS = {
+  b: 1,
+  k: 1000,
+  m: 1000 * 1000,
+  g: 1000 * 1000 * 1000,
+  t: 1000 * 1000 * 1000 * 1000,
+  kb: 1000,
+  mb: 1000 * 1000,
+  gb: 1000 * 1000 * 1000,
+  tb: 1000 * 1000 * 1000 * 1000,
+  kib: 1024,
+  mib: 1024 * 1024,
+  gib: 1024 * 1024 * 1024,
+  tib: 1024 * 1024 * 1024 * 1024,
+};
+
+class SizeFilter {
+  constructor(type, value) {
+    this.type = type;
+    this.value = value;
+  }
+
+  static fromString(s) {
+    const match = s.match(SIZE_REGEX);
+    if (!match) {
+      throw new Error(`Invalid size filter: ${s}`);
+    }
+
+    const sign = match.groups.sign;
+    const num = parseInt(match.groups.num, 10);
+    const unit = match.groups.unit.toLowerCase();
+
+    const multiplier = UNIT_MULTIPLIERS[unit] || 1;
+    const size = num * multiplier;
+
+    if (sign === '+') {
+      return new SizeFilter('min', size);
+    } else if (sign === '-') {
+      return new SizeFilter('max', size);
+    }
+    return new SizeFilter('equals', size);
+  }
+
+  isWithin(fileSize) {
+    switch (this.type) {
+      case 'min':
+        return fileSize >= this.value;
+      case 'max':
+        return fileSize <= this.value;
+      case 'equals':
+        return fileSize === this.value;
+      default:
+        return true;
+    }
+  }
+}
+
+module.exports = { SizeFilter };
+  };
+
+  // Module: filter/time.js
+  moduleFactories['filter_time'] = function(module, exports) {
+'use strict';
+
+const SPAN_REGEX = /^(\d+)(min|h|d|w|mo|y)$/i;
+const TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/;
+const UNIX_TIMESTAMP_REGEX = /^@(\d+(?:\.\d+)?)$/;
+
+class TimeFilter {
+  constructor(type, time) {
+    this.type = type;
+    this.time = time;
+  }
+
+  static parseDuration(str) {
+    const match = str.match(SPAN_REGEX);
+    if (!match) return null;
+
+    const num = parseInt(match[1], 10);
+    const unit = match[2].toLowerCase();
+
+    const now = Date.now();
+    let ms;
+
+    switch (unit) {
+      case 'min':
+        ms = num * 60 * 1000;
+        break;
+      case 'h':
+        ms = num * 60 * 60 * 1000;
+        break;
+      case 'd':
+        ms = num * 24 * 60 * 60 * 1000;
+        break;
+      case 'w':
+        ms = num * 7 * 24 * 60 * 60 * 1000;
+        break;
+      case 'mo':
+        ms = num * 30 * 24 * 60 * 60 * 1000;
+        break;
+      case 'y':
+        ms = num * 365 * 24 * 60 * 60 * 1000;
+        break;
+      default:
+        return null;
+    }
+
+    return new Date(now - ms);
+  }
+
+  static parseTimestamp(str) {
+    if (TIMESTAMP_REGEX.test(str)) {
+      const d = new Date(str);
+      if (isNaN(d.getTime())) return null;
+      return d;
+    }
+
+    const unixMatch = str.match(UNIX_TIMESTAMP_REGEX);
+    if (unixMatch) {
+      return new Date(parseFloat(unixMatch[1]) * 1000);
+    }
+
+    return null;
+  }
+
+  static after(str) {
+    let time = TimeFilter.parseDuration(str);
+    if (!time) {
+      time = TimeFilter.parseTimestamp(str);
+    }
+    if (!time) return null;
+    return new TimeFilter('after', time);
+  }
+
+  static before(str) {
+    let time = TimeFilter.parseDuration(str);
+    if (!time) {
+      time = TimeFilter.parseTimestamp(str);
+    }
+    if (!time) return null;
+    return new TimeFilter('before', time);
+  }
+
+  appliesTo(modTime) {
+    const t = modTime instanceof Date ? modTime : new Date(modTime);
+
+    switch (this.type) {
+      case 'after':
+        return t >= this.time;
+      case 'before':
+        return t <= this.time;
+      default:
+        return true;
+    }
+  }
+}
+
+module.exports = { TimeFilter };
+  };
+
+  // Module: filter/filetypes.js
+  moduleFactories['filter_filetypes'] = function(module, exports) {
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+
+class FileTypes {
+  constructor() {
+    this.files = false;
+    this.directories = false;
+    this.symlinks = false;
+    this.blockDevices = false;
+    this.charDevices = false;
+    this.sockets = false;
+    this.pipes = false;
+    this.executablesOnly = false;
+    this.emptyOnly = false;
+  }
+
+  shouldIgnore(filePath, stat) {
+    if (!stat) return true;
+
+    const isFile = stat.isFile();
+    const isDir = stat.isDirectory();
+    const isSymlink = stat.isSymbolicLink ? stat.isSymbolicLink() : false;
+    const isBlock = stat.isBlockDevice ? stat.isBlockDevice() : false;
+    const isChar = stat.isCharacterDevice ? stat.isCharacterDevice() : false;
+    const isSocket = stat.isSocket ? stat.isSocket() : false;
+    const isPipe = stat.isFIFO ? stat.isFIFO() : false;
+
+    if (this.executablesOnly) {
+      if (isWindows) {
+        const ext = path.extname(filePath).toLowerCase();
+        const executables = ['.exe', '.cmd', '.bat', '.com'];
+        if (!executables.includes(ext)) return true;
+      } else {
+        try {
+          fs.accessSync(filePath, fs.constants.X_OK);
+        } catch {
+          return true;
+        }
+      }
+    }
+
+    if (this.emptyOnly) {
+      if (isFile && stat.size !== 0) return true;
+      if (isDir) {
+        try {
+          const files = fs.readdirSync(filePath);
+          if (files.length !== 0) return true;
+        } catch {
+          return true;
+        }
+      }
+    }
+
+    const hasTypeFilter =
+      this.files ||
+      this.directories ||
+      this.symlinks ||
+      this.blockDevices ||
+      this.charDevices ||
+      this.sockets ||
+      this.pipes;
+
+    if (hasTypeFilter) {
+      if (this.files && isFile) return false;
+      if (this.directories && isDir) return false;
+      if (this.symlinks && isSymlink) return false;
+      if (this.blockDevices && isBlock) return false;
+      if (this.charDevices && isChar) return false;
+      if (this.sockets && isSocket) return false;
+      if (this.pipes && isPipe) return false;
+      return true;
+    }
+
+    return false;
+  }
+}
+
+function parseFileType(typeStr) {
+  const ft = new FileTypes();
+  const t = typeStr.toLowerCase();
+
+  switch (t) {
+    case 'f':
+    case 'file':
+      ft.files = true;
+      break;
+    case 'd':
+    case 'dir':
+    case 'directory':
+      ft.directories = true;
+      break;
+    case 'l':
+    case 'symlink':
+      ft.symlinks = true;
+      break;
+    case 'b':
+    case 'block-device':
+      ft.blockDevices = true;
+      break;
+    case 'c':
+    case 'char-device':
+      ft.charDevices = true;
+      break;
+    case 'x':
+    case 'executable':
+      ft.executablesOnly = true;
+      ft.files = true;
+      break;
+    case 'e':
+    case 'empty':
+      ft.emptyOnly = true;
+      break;
+    case 's':
+    case 'socket':
+      ft.sockets = true;
+      break;
+    case 'p':
+    case 'pipe':
+      ft.pipes = true;
+      break;
+    default:
+      throw new Error(`Unknown file type: ${typeStr}`);
+  }
+
+  if (ft.emptyOnly && !ft.files && !ft.directories) {
+    ft.files = true;
+    ft.directories = true;
+  }
+
+  return ft;
+}
+
+module.exports = { FileTypes, parseFileType };
+  };
+
+  // Module: filter/mod.js
+  moduleFactories['filter_mod'] = function(module, exports) {
+'use strict';
+
+const { SizeFilter } = requireModule('size');
+const { TimeFilter } = requireModule('time');
+const { FileTypes, parseFileType } = requireModule('filetypes');
+
+module.exports = { SizeFilter, TimeFilter, FileTypes, parseFileType };
+  };
+
+  // Module: exec.js
+  moduleFactories['exec'] = function(module, exports) {
+'use strict';
+
+const { spawn } = require('child_process');
+const path = require('path');
+
+const isWindows = process.platform === 'win32';
+
+class CommandSet {
+  constructor(mode, templates) {
+    this.mode = mode;
+    this.templates = templates;
+  }
+
+  static new(input) {
+    const templates = input.map((args) => new CommandTemplate(args));
+    return new CommandSet('one-by-one', templates);
+  }
+
+  static newBatch(input) {
+    const templates = input.map((args) => new CommandTemplate(args));
+    return new CommandSet('batch', templates);
+  }
+
+  execute(filePath, pathSeparator, stdout, stderr) {
+    return new Promise((resolve) => {
+      let exitCode = 0;
+      let pending = this.templates.length;
+
+      if (pending === 0) {
+        resolve(0);
+        return;
+      }
+
+      for (const template of this.templates) {
+        const args = template.generate(filePath, pathSeparator);
+        const cmd = args[0];
+        const cmdArgs = args.slice(1);
+
+        const child = spawn(cmd, cmdArgs, {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          shell: isWindows,
+        });
+
+        child.stdout.on('data', (data) => {
+          if (stdout) stdout.write(data);
+        });
+
+        child.stderr.on('data', (data) => {
+          if (stderr) stderr.write(data);
+        });
+
+        child.on('close', (code) => {
+          if (code !== 0) exitCode = code || 1;
+          pending--;
+          if (pending === 0) resolve(exitCode);
+        });
+
+        child.on('error', () => {
+          exitCode = 1;
+          pending--;
+          if (pending === 0) resolve(exitCode);
+        });
+      }
+    });
+  }
+
+  async executeBatch(filePaths, batchSize, pathSeparator, stdout, stderr) {
+    let exitCode = 0;
+    const limit = batchSize || filePaths.length;
+
+    for (let i = 0; i < filePaths.length; i += limit) {
+      const batch = filePaths.slice(i, i + limit);
+
+      for (const template of this.templates) {
+        const code = await this._execBatchSingle(template, batch, pathSeparator, stdout, stderr);
+        if (code !== 0) exitCode = code;
+      }
+    }
+
+    return exitCode;
+  }
+
+  _execBatchSingle(template, filePaths, pathSeparator, stdout, stderr) {
+    return new Promise((resolve) => {
+      const args = template.generateBatch(filePaths, pathSeparator);
+      const cmd = args[0];
+      const cmdArgs = args.slice(1);
+
+      const child = spawn(cmd, cmdArgs, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: isWindows,
+      });
+
+      let exitCode = 0;
+
+      child.stdout.on('data', (data) => {
+        if (stdout) stdout.write(data);
+      });
+
+      child.stderr.on('data', (data) => {
+        if (stderr) stderr.write(data);
+      });
+
+      child.on('close', (code) => {
+        exitCode = code || 0;
+        resolve(exitCode);
+      });
+
+      child.on('error', () => {
+        resolve(1);
+      });
+    });
+  }
+}
+
+class CommandTemplate {
+  constructor(args) {
+    this.args = args;
+    this.hasPlaceholder = args.some((a) => a === '{}');
+  }
+
+  generate(filePath, pathSeparator) {
+    const result = [];
+    let placeholderFound = false;
+
+    for (const arg of this.args) {
+      if (arg === '{}') {
+        result.push(replacePathSeparator(filePath, pathSeparator));
+        placeholderFound = true;
+      } else if (arg === '{/}') {
+        result.push(path.basename(filePath));
+      } else if (arg === '{//}') {
+        result.push(replacePathSeparator(path.dirname(filePath), pathSeparator));
+      } else if (arg === '{.}') {
+        const ext = path.extname(filePath);
+        const stem = filePath.slice(0, filePath.length - ext.length);
+        result.push(replacePathSeparator(stem, pathSeparator));
+      } else if (arg === '{/.}') {
+        const base = path.basename(filePath);
+        const ext = path.extname(base);
+        result.push(base.slice(0, base.length - ext.length));
+      } else {
+        result.push(replaceSeparators(arg, pathSeparator));
+      }
+    }
+
+    if (!placeholderFound) {
+      result.push(replacePathSeparator(filePath, pathSeparator));
+    }
+
+    return result;
+  }
+
+  generateBatch(filePaths, pathSeparator) {
+    const result = [];
+    let placeholderFound = false;
+
+    for (const arg of this.args) {
+      if (arg === '{}') {
+        for (const fp of filePaths) {
+          result.push(replacePathSeparator(fp, pathSeparator));
+        }
+        placeholderFound = true;
+      } else if (arg === '{/}') {
+        for (const fp of filePaths) {
+          result.push(path.basename(fp));
+        }
+      } else if (arg === '{//}') {
+        for (const fp of filePaths) {
+          result.push(replacePathSeparator(path.dirname(fp), pathSeparator));
+        }
+      } else if (arg === '{.}') {
+        for (const fp of filePaths) {
+          const ext = path.extname(fp);
+          const stem = fp.slice(0, fp.length - ext.length);
+          result.push(replacePathSeparator(stem, pathSeparator));
+        }
+      } else if (arg === '{/.}') {
+        for (const fp of filePaths) {
+          const base = path.basename(fp);
+          const ext = path.extname(base);
+          result.push(base.slice(0, base.length - ext.length));
+        }
+      } else {
+        result.push(replaceSeparators(arg, pathSeparator));
+      }
+    }
+
+    if (!placeholderFound) {
+      for (const fp of filePaths) {
+        result.push(replacePathSeparator(fp, pathSeparator));
+      }
+    }
+
+    return result;
+  }
+}
+
+function replacePathSeparator(p, separator) {
+  if (!separator || separator === path.sep) {
+    return p;
+  }
+  return p.split(path.sep).join(separator);
+}
+
+function replaceSeparators(str, separator) {
+  if (!separator || separator === path.sep) {
+    return str;
+  }
+  return str.split(path.sep).join(separator);
+}
+
+module.exports = { CommandSet, CommandTemplate };
+  };
+
+  // Module: hyperlink.js
+  moduleFactories['hyperlink'] = function(module, exports) {
+'use strict';
+
+const os = require('os');
+const path = require('path');
+
+const isWindows = process.platform === 'win32';
+
+function host() {
+  if (isWindows) {
+    return '/';
+  }
+  return os.hostname();
+}
+
+function encodeChar(ch) {
+  const code = ch.charCodeAt(0);
+  if (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    ch === '/' ||
+    ch === ':' ||
+    ch === '-' ||
+    ch === '.' ||
+    ch === '_' ||
+    ch === '~' ||
+    ch === ' '
+  ) {
+    return ch;
+  }
+
+  if (code >= 128) {
+    return Buffer.from(ch)
+      .toString('hex')
+      .replace(/(.{2})/g, '%$1')
+      .toUpperCase();
+  }
+
+  const buf = Buffer.from(ch);
+  return buf.toString('hex').replace(/(.{2})/g, '%$1').toUpperCase();
+}
+
+function encode(str) {
+  let result = '';
+  for (let i = 0; i < str.length; i++) {
+    result += encodeChar(str[i]);
+  }
+  return result;
+}
+
+function generateFileUrl(filePath) {
+  const absPath = path.resolve(filePath);
+  const encodedPath = encode(absPath);
+  return `file://${host()}${encodedPath}`;
+}
+
+function wrapInHyperlink(text, filePath) {
+  const url = generateFileUrl(filePath);
+  return `\x1B]8;;${url}\x1B\\${text}\x1B]8;;\x1B\\`;
+}
+
+module.exports = { wrapInHyperlink, generateFileUrl };
+  };
+
+  // Module: output.js
+  moduleFactories['output'] = function(module, exports) {
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const { parse: parseFormat, generate: generateFormat } = requireModule('fmt');
+const { wrapInHyperlink } = requireModule('hyperlink');
+const { isWindows } = requireModule('filesystem');
+
+const LS_COLORS = {
+  di: '0;38;5;81',
+  ln: '0;38;5;203',
+  so: '0;38;5;16;48;5;203',
+  pi: '0;38;5;16;48;5;81',
+  bd: '0;38;5;81;48;5;236',
+  cd: '0;38;5;203;48;5;236',
+  or: '0;38;5;16;48;5;203',
+  ex: '1;38;5;203',
+  fi: '0',
+};
+
+function getLsColors() {
+  const env = process.env.LS_COLORS;
+  if (env) {
+    const colors = {};
+    for (const part of env.split(':')) {
+      const [key, value] = part.split('=');
+      if (key && value) {
+        colors[key] = value;
+      }
+    }
+    return colors;
+  }
+  return LS_COLORS;
+}
+
+function getStyleForEntry(filePath, stat, lsColors) {
+  if (!lsColors) return null;
+
+  if (stat.isDirectory()) {
+    return lsColors.di || null;
+  }
+  if (stat.isSymbolicLink && stat.isSymbolicLink()) {
+    return lsColors.ln || null;
+  }
+  if (stat.isSocket && stat.isSocket()) {
+    return lsColors.so || null;
+  }
+  if (stat.isFIFO && stat.isFIFO()) {
+    return lsColors.pi || null;
+  }
+  if (stat.isBlockDevice && stat.isBlockDevice()) {
+    return lsColors.bd || null;
+  }
+  if (stat.isCharacterDevice && stat.isCharacterDevice()) {
+    return lsColors.cd || null;
+  }
+  if (stat.isFile()) {
+    try {
+      fs.accessSync(filePath, fs.constants.X_OK);
+      return lsColors.ex || null;
+    } catch {
+      return lsColors.fi || null;
+    }
+  }
+
+  return null;
+}
+
+function getExtensionStyle(filename, lsColors) {
+  if (!lsColors) return null;
+  const ext = path.extname(filename);
+  if (ext) {
+    return lsColors[ext] || null;
+  }
+  return null;
+}
+
+function colorize(text, style) {
+  if (!style) return text;
+  return `\x1B[${style}m${text}\x1B[0m`;
+}
+
+function printEntry(filePath, stat, config) {
+  const displayPath = config.stripCwdPrefix
+    ? filePath.replace(/^\.\//, '')
+    : filePath;
+
+  let output;
+
+  if (config.format) {
+    output = generateFormat(config.format, displayPath, config.pathSeparator);
+  } else if (config.lsColors && config.coloredOutput) {
+    output = colorizePath(displayPath, stat, config.lsColors);
+  } else {
+    output = displayPath;
+  }
+
+  if (config.hyperlink && config.coloredOutput) {
+    output = wrapInHyperlink(output, filePath);
+  }
+
+  if (config.nullSeparator) {
+    process.stdout.write(output + '\0');
+  } else {
+    process.stdout.write(output + '\n');
+  }
+}
+
+function colorizePath(filePath, stat, lsColors) {
+  const dir = path.dirname(filePath);
+  const base = path.basename(filePath);
+
+  let dirPart = dir;
+  let basePart = base;
+
+  const dirStyle = lsColors.di || '0';
+  let baseStyle = getStyleForEntry(filePath, stat, lsColors);
+
+  if (!baseStyle) {
+    baseStyle = getExtensionStyle(base, lsColors);
+  }
+
+  let result;
+  if (dir === '.' || dir === '') {
+    result = colorize(basePart, baseStyle);
+  } else {
+    result = colorize(dirPart + path.sep, dirStyle) + colorize(basePart, baseStyle);
+  }
+
+  if (stat.isDirectory()) {
+    const separator = lsColors.di ? colorize(path.sep, lsColors.di) : path.sep;
+    result += separator;
+  }
+
+  return result;
+}
+
+function printTrailingSlash(config) {
+  if (config.lsColors && config.coloredOutput) {
+    const style = config.lsColors.di || '0';
+    const sep = colorize(config.actualPathSeparator, style);
+    process.stdout.write(sep);
+  } else {
+    process.stdout.write(config.actualPathSeparator);
+  }
+}
+
+module.exports = { printEntry, getLsColors, colorizePath, printTrailingSlash };
+  };
+
+  // Module: cli.js
+  moduleFactories['cli'] = function(module, exports) {
+'use strict';
+
+const path = require('path');
+const { SizeFilter } = requireModule('filter_size');
+const { TimeFilter } = requireModule('filter_time');
+const { parseFileType } = requireModule('filter_filetypes');
+
+function parseArgs(argv) {
+  const args = argv.slice(2);
+  const opts = {
+    hidden: false,
+    noIgnore: false,
+    noIgnoreVcs: false,
+    noRequireGit: false,
+    noIgnoreParent: false,
+    noGlobalIgnoreFile: false,
+    caseSensitive: false,
+    ignoreCase: false,
+    glob: false,
+    regex: false,
+    fixedStrings: false,
+    exact: false,
+    exprs: [],
+    absolutePath: false,
+    listDetails: false,
+    follow: false,
+    fullPath: false,
+    nullSeparator: false,
+    maxDepth: undefined,
+    minDepth: undefined,
+    exactDepth: undefined,
+    exclude: [],
+    prune: false,
+    filetype: [],
+    extensions: [],
+    size: [],
+    changedWithin: undefined,
+    changedBefore: undefined,
+    owner: undefined,
+    format: undefined,
+    exec: undefined,
+    execBatch: undefined,
+    batchSize: 0,
+    ignoreFile: [],
+    color: 'auto',
+    hyperlink: 'never',
+    ignoreContain: [],
+    threads: undefined,
+    maxBufferTime: undefined,
+    maxResults: undefined,
+    quiet: false,
+    showErrors: false,
+    baseDirectory: undefined,
+    pattern: '',
+    pathSeparator: undefined,
+    paths: [],
+    searchPaths: [],
+    stripCwdPrefix: undefined,
+    oneFileSystem: false,
+    rgAliasCount: 0,
+    help: false,
+    version: false,
+  };
+
+  let positionalArgCount = 0;
+  let i = 0;
+
+  while (i < args.length) {
+    const arg = args[i];
+
+    if (arg === '--') {
+      i++;
+      break;
+    }
+
+    if (arg === '-H' || arg === '--hidden') {
+      opts.hidden = true;
+    } else if (arg === '--no-hidden') {
+      opts.hidden = false;
+    } else if (arg === '-I' || arg === '--no-ignore') {
+      opts.noIgnore = true;
+    } else if (arg === '--ignore') {
+      opts.noIgnore = false;
+    } else if (arg === '--no-ignore-vcs') {
+      opts.noIgnoreVcs = true;
+    } else if (arg === '--ignore-vcs') {
+      opts.noIgnoreVcs = false;
+    } else if (arg === '--no-require-git') {
+      opts.noRequireGit = true;
+    } else if (arg === '--require-git') {
+      opts.noRequireGit = false;
+    } else if (arg === '--no-ignore-parent') {
+      opts.noIgnoreParent = true;
+    } else if (arg === '--ignore-parent') {
+      opts.noIgnoreParent = false;
+    } else if (arg === '--no-global-ignore-file') {
+      opts.noGlobalIgnoreFile = true;
+    } else if (arg === '-u' || arg === '--unrestricted') {
+      opts.rgAliasCount++;
+      opts.noIgnore = true;
+      opts.hidden = true;
+    } else if (arg === '-s' || arg === '--case-sensitive') {
+      opts.caseSensitive = true;
+    } else if (arg === '-i' || arg === '--ignore-case') {
+      opts.ignoreCase = true;
+    } else if (arg === '-g' || arg === '--glob') {
+      opts.glob = true;
+    } else if (arg === '--regex') {
+      opts.regex = true;
+    } else if (arg === '-F' || arg === '--fixed-strings' || arg === '--literal') {
+      opts.fixedStrings = true;
+    } else if (arg === '--exact') {
+      opts.exact = true;
+    } else if (arg === '--and') {
+      i++;
+      if (i < args.length) {
+        opts.exprs.push(args[i]);
+      }
+    } else if (arg === '-a' || arg === '--absolute-path') {
+      opts.absolutePath = true;
+    } else if (arg === '--relative-path') {
+      opts.absolutePath = false;
+    } else if (arg === '-l' || arg === '--list-details') {
+      opts.listDetails = true;
+    } else if (arg === '-L' || arg === '--follow' || arg === '--dereference') {
+      opts.follow = true;
+    } else if (arg === '--no-follow') {
+      opts.follow = false;
+    } else if (arg === '-p' || arg === '--full-path') {
+      opts.fullPath = true;
+    } else if (arg === '-0' || arg === '--print0') {
+      opts.nullSeparator = true;
+    } else if (arg === '-d' || arg === '--maxdepth' || arg === '--max-depth') {
+      i++;
+      if (i < args.length) {
+        opts.maxDepth = parseInt(args[i], 10);
+      }
+    } else if (arg === '--mindepth' || arg === '--min-depth') {
+      i++;
+      if (i < args.length) {
+        opts.minDepth = parseInt(args[i], 10);
+      }
+    } else if (arg === '--exact-depth') {
+      i++;
+      if (i < args.length) {
+        opts.exactDepth = parseInt(args[i], 10);
+      }
+    } else if (arg === '-E' || arg === '--exclude') {
+      i++;
+      if (i < args.length) {
+        opts.exclude.push(args[i]);
+      }
+    } else if (arg === '--prune') {
+      opts.prune = true;
+    } else if (arg === '-t' || arg === '--type') {
+      i++;
+      if (i < args.length) {
+        opts.filetype.push(args[i]);
+      }
+    } else if (arg === '-e' || arg === '--extension') {
+      i++;
+      if (i < args.length) {
+        opts.extensions.push(args[i]);
+      }
+    } else if (arg === '-S' || arg === '--size') {
+      i++;
+      if (i < args.length) {
+        opts.size.push(SizeFilter.fromString(args[i]));
+      }
+    } else if (arg === '--changed-within' || arg === '--change-newer-than' || arg === '--newer' || arg === '--changed-after') {
+      i++;
+      if (i < args.length) {
+        opts.changedWithin = args[i];
+      }
+    } else if (arg === '--changed-before' || arg === '--change-older-than' || arg === '--older') {
+      i++;
+      if (i < args.length) {
+        opts.changedBefore = args[i];
+      }
+    } else if (arg === '-o' || arg === '--owner') {
+      i++;
+      if (i < args.length) {
+        opts.owner = args[i];
+      }
+    } else if (arg === '--format') {
+      i++;
+      if (i < args.length) {
+        opts.format = args[i];
+      }
+    } else if (arg === '-x' || arg === '--exec') {
+      i++;
+      const cmdArgs = [];
+      while (i < args.length && args[i] !== ';') {
+        cmdArgs.push(args[i]);
+        i++;
+      }
+      opts.exec = cmdArgs;
+    } else if (arg === '-X' || arg === '--exec-batch') {
+      i++;
+      const cmdArgs = [];
+      while (i < args.length && args[i] !== ';') {
+        cmdArgs.push(args[i]);
+        i++;
+      }
+      opts.execBatch = cmdArgs;
+    } else if (arg === '--batch-size') {
+      i++;
+      if (i < args.length) {
+        opts.batchSize = parseInt(args[i], 10);
+      }
+    } else if (arg === '--ignore-file') {
+      i++;
+      if (i < args.length) {
+        opts.ignoreFile.push(args[i]);
+      }
+    } else if (arg === '-c' || arg === '--color') {
+      i++;
+      if (i < args.length) {
+        opts.color = args[i].toLowerCase();
+      }
+    } else if (arg === '--hyperlink' || arg === '--hyper') {
+      i++;
+      if (i < args.length) {
+        opts.hyperlink = args[i].toLowerCase();
+      } else {
+        opts.hyperlink = 'auto';
+      }
+    } else if (arg === '--ignore-contain') {
+      i++;
+      if (i < args.length) {
+        opts.ignoreContain.push(args[i]);
+      }
+    } else if (arg === '-j' || arg === '--threads') {
+      i++;
+      if (i < args.length) {
+        opts.threads = parseInt(args[i], 10);
+      }
+    } else if (arg === '--max-buffer-time') {
+      i++;
+      if (i < args.length) {
+        opts.maxBufferTime = parseInt(args[i], 10);
+      }
+    } else if (arg === '--max-results') {
+      i++;
+      if (i < args.length) {
+        opts.maxResults = parseInt(args[i], 10);
+      }
+    } else if (arg === '-1') {
+      opts.maxResults = 1;
+    } else if (arg === '-q' || arg === '--quiet' || arg === '--has-results') {
+      opts.quiet = true;
+    } else if (arg === '--show-errors') {
+      opts.showErrors = true;
+    } else if (arg === '-C' || arg === '--base-directory') {
+      i++;
+      if (i < args.length) {
+        opts.baseDirectory = args[i];
+      }
+    } else if (arg === '--path-separator') {
+      i++;
+      if (i < args.length) {
+        opts.pathSeparator = args[i];
+      }
+    } else if (arg === '--search-path') {
+      i++;
+      if (i < args.length) {
+        opts.searchPaths.push(args[i]);
+      }
+    } else if (arg === '--strip-cwd-prefix') {
+      i++;
+      if (i < args.length && args[i] !== '--') {
+        opts.stripCwdPrefix = args[i].toLowerCase();
+      } else {
+        opts.stripCwdPrefix = 'always';
+        if (args[i] === '--') i--;
+      }
+    } else if (arg === '--one-file-system' || arg === '--mount' || arg === '--xdev') {
+      opts.oneFileSystem = true;
+    } else if (arg === '-h' || arg === '--help') {
+      opts.help = true;
+    } else if (arg === '-v' || arg === '--version') {
+      opts.version = true;
+    } else if (arg.startsWith('-')) {
+      process.stderr.write(`[fd error]: Unknown option: ${arg}\n`);
+      process.exit(1);
+    } else {
+      positionalArgCount++;
+      if (positionalArgCount === 1 && !opts.pattern) {
+        opts.pattern = arg;
+      } else {
+        opts.paths.push(arg);
+      }
+    }
+
+    i++;
+  }
+
+  while (i < args.length) {
+    opts.paths.push(args[i]);
+    i++;
+  }
+
+  return opts;
+}
+
+function resolvePaths(opts) {
+  if (opts.paths.length === 0 && opts.searchPaths.length === 0) {
+    return [process.cwd()];
+  }
+
+  const paths = opts.searchPaths.length > 0 ? opts.searchPaths : opts.paths;
+
+  return paths
+    .map((p) => {
+      const resolved = path.resolve(p);
+      try {
+        const stat = require('fs').statSync(resolved, { throwIfNoEntry: false });
+        if (stat && stat.isDirectory()) {
+          if (opts.absolutePath) {
+            return resolved;
+          }
+          return p;
+        }
+        process.stderr.write(`[fd error]: Search path '${p}' is not a directory.\n`);
+        return null;
+      } catch {
+        process.stderr.write(`[fd error]: Search path '${p}' is not a directory.\n`);
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+function shouldStripCwdPrefix(opts) {
+  const noSearchPaths = opts.paths.length === 0 && opts.searchPaths.length === 0;
+
+  if (opts.stripCwdPrefix === 'always') return true;
+  if (opts.stripCwdPrefix === 'never') return false;
+
+  if (noSearchPaths) {
+    return !opts.nullSeparator && !opts.exec;
+  }
+  return false;
+}
+
+module.exports = { parseArgs, resolvePaths, shouldStripCwdPrefix };
+  };
+
+  // Module: config.js
+  moduleFactories['config'] = function(module, exports) {
+'use strict';
+
+const path = require('path');
+const { parse: parseFormat } = requireModule('fmt');
+const { parseFileType, FileTypes } = requireModule('filter_filetypes');
+const { TimeFilter } = requireModule('filter_time');
+const { CommandSet } = requireModule('exec');
+const { getLsColors } = requireModule('output');
+const { shouldStripCwdPrefix } = requireModule('cli');
+const { patternHasUppercaseChar } = requireModule('regex_helper');
+
+function constructConfig(opts) {
+  const caseSensitive =
+    !opts.ignoreCase &&
+    (opts.caseSensitive || opts.pattern && patternHasUppercaseChar(opts.pattern));
+
+  const pathSeparator =
+    opts.pathSeparator ||
+    (process.platform === 'win32' ? requireModule('filesystem').defaultPathSeparator() : null);
+
+  const actualPathSeparator = pathSeparator || path.sep;
+
+  const coloredOutput = resolveColoredOutput(opts);
+
+  const lsColors = coloredOutput ? getLsColors() : null;
+
+  const hyperlink =
+    opts.hyperlink === 'always' ? true : opts.hyperlink === 'never' ? false : coloredOutput;
+
+  const fileTypes = opts.filetype.length > 0 ? mergeFileTypes(opts.filetype) : null;
+
+  const extensions = opts.extensions.map((e) => e.replace(/^\./, ''));
+
+  const format = opts.format ? parseFormat(opts.format) : null;
+
+  let command = null;
+  if (opts.exec) {
+    command = CommandSet.new(opts.exec);
+  } else if (opts.execBatch) {
+    command = CommandSet.newBatch(opts.execBatch);
+  }
+
+  const timeConstraints = [];
+  if (opts.changedWithin) {
+    const f = TimeFilter.after(opts.changedWithin);
+    if (f) {
+      timeConstraints.push(f);
+    } else {
+      process.stderr.write(`[fd error]: '${opts.changedWithin}' is not a valid date or duration.\n`);
+      process.exit(1);
+    }
+  }
+  if (opts.changedBefore) {
+    const f = TimeFilter.before(opts.changedBefore);
+    if (f) {
+      timeConstraints.push(f);
+    } else {
+      process.stderr.write(`[fd error]: '${opts.changedBefore}' is not a valid date or duration.\n`);
+      process.exit(1);
+    }
+  }
+
+  const hasCommand = command !== null;
+
+  return {
+    caseSensitive,
+    fullPathBase: opts.fullPath ? process.cwd() : null,
+    ignoreHidden: !opts.hidden && opts.rgAliasCount === 0,
+    readFdignore: !opts.noIgnore && opts.rgAliasCount === 0,
+    readVcsignore: !opts.noIgnore && opts.rgAliasCount === 0 && !opts.noIgnoreVcs,
+    requireGitToReadVcsignore: !opts.noRequireGit,
+    readParentIgnore: !opts.noIgnoreParent,
+    readGlobalIgnore: !opts.noIgnore && opts.rgAliasCount === 0 && !opts.noGlobalIgnoreFile,
+    followLinks: opts.follow,
+    oneFileSystem: opts.oneFileSystem,
+    nullSeparator: opts.nullSeparator,
+    quiet: opts.quiet,
+    maxDepth: opts.exactDepth !== undefined ? opts.exactDepth : opts.maxDepth,
+    minDepth: opts.exactDepth !== undefined ? opts.exactDepth : opts.minDepth,
+    prune: opts.prune,
+    lsColors,
+    coloredOutput,
+    hyperlink,
+    fileTypes,
+    extensions,
+    format,
+    command,
+    batchSize: opts.batchSize,
+    excludePatterns: opts.exclude.map((p) => '!' + p),
+    ignoreFiles: opts.ignoreFile,
+    sizeConstraints: opts.size,
+    timeConstraints,
+    showFilesystemErrors: opts.showErrors,
+    pathSeparator,
+    actualPathSeparator,
+    maxResults: opts.maxResults,
+    stripCwdPrefix: shouldStripCwdPrefix(opts),
+    ignoreContain: opts.ignoreContain,
+  };
+}
+
+function resolveColoredOutput(opts) {
+  if (opts.color === 'always') return true;
+  if (opts.color === 'never') return false;
+
+  const noColor = process.env.NO_COLOR && process.env.NO_COLOR.length > 0;
+  const isTerminal = process.stdout.isTTY;
+  return !noColor && isTerminal;
+}
+
+function mergeFileTypes(typeStrings) {
+  const result = new FileTypes();
+
+  for (const ts of typeStrings) {
+    const ft = parseFileType(ts);
+    result.files = result.files || ft.files;
+    result.directories = result.directories || ft.directories;
+    result.symlinks = result.symlinks || ft.symlinks;
+    result.blockDevices = result.blockDevices || ft.blockDevices;
+    result.charDevices = result.charDevices || ft.charDevices;
+    result.sockets = result.sockets || ft.sockets;
+    result.pipes = result.pipes || ft.pipes;
+    result.executablesOnly = result.executablesOnly || ft.executablesOnly;
+    result.emptyOnly = result.emptyOnly || ft.emptyOnly;
+  }
+
+  return result;
+}
+
+module.exports = { constructConfig };
+  };
+
+  // Module: walk.js
+  moduleFactories['walk'] = function(module, exports) {
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
+const { isExistingDirectory, getExtension } = requireModule('filesystem');
+const { printEntry } = requireModule('output');
+const { ExitCode, exit } = requireModule('exit_codes');
+const { printError } = requireModule('error');
+
+const IGNORE_FILES = ['.gitignore', '.ignore', '.fdignore'];
+const GLOBAL_IGNORE_FILE = '.fdignore';
+
+function parseGitignore(content, baseDir) {
+  const patterns = [];
+  const lines = content.split('\n');
+
+  for (let line of lines) {
+    line = line.trim();
+
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+
+    let negated = false;
+    if (line.startsWith('!')) {
+      negated = true;
+      line = line.slice(1);
+    }
+
+    let regexStr;
+    const isDir = line.endsWith('/');
+    if (isDir) {
+      line = line.slice(0, -1);
+    }
+
+    if (line.includes('*')) {
+      regexStr = globToRegex(line);
+    } else if (line.includes('/')) {
+      regexStr = '^' + escapeRegex(line) + '(/.*)?$';
+    } else {
+      regexStr = '(^|/)' + escapeRegex(line) + '(/.*)?$';
+    }
+
+    try {
+      const regex = new RegExp(regexStr, 'i');
+      patterns.push({ regex, negated, isDir, baseDir });
+    } catch {
+      // skip invalid patterns
+    }
+  }
+
+  return patterns;
+}
+
+function globToRegex(glob) {
+  let regex = '';
+  let i = 0;
+
+  while (i < glob.length) {
+    const ch = glob[i];
+
+    if (ch === '*') {
+      if (i + 1 < glob.length && glob[i + 1] === '*') {
+        regex += '.*';
+        i += 2;
+        if (i < glob.length && glob[i] === '/') {
+          i++;
+          regex += '/';
+        }
+      } else {
+        regex += '[^/]*';
+        i++;
+      }
+    } else if (ch === '?') {
+      regex += '[^/]';
+      i++;
+    } else if (ch === '[') {
+      let j = i + 1;
+      while (j < glob.length && glob[j] !== ']') {
+        j++;
+      }
+      if (j < glob.length) {
+        regex += '[' + glob.slice(i + 1, j) + ']';
+        i = j + 1;
+      } else {
+        regex += escapeRegex(ch);
+        i++;
+      }
+    } else {
+      regex += escapeRegex(ch);
+      i++;
+    }
+  }
+
+  return regex;
+}
+
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function loadIgnorePatterns(dirPath, config) {
+  const patterns = [];
+
+  if (config.readFdignore) {
+    for (const ignoreFile of config.ignoreFiles) {
+      try {
+        const content = fs.readFileSync(ignoreFile, 'utf-8');
+        patterns.push(...parseGitignore(content, dirPath));
+      } catch {
+        // file doesn't exist or can't be read
+      }
+    }
+  }
+
+  if (config.readParentIgnore) {
+    const fdIgnorePath = path.join(dirPath, '.fdignore');
+    try {
+      const content = fs.readFileSync(fdIgnorePath, 'utf-8');
+      patterns.push(...parseGitignore(content, dirPath));
+    } catch {
+      // no .fdignore
+    }
+
+    const ignorePath = path.join(dirPath, '.ignore');
+    try {
+      const content = fs.readFileSync(ignorePath, 'utf-8');
+      patterns.push(...parseGitignore(content, dirPath));
+    } catch {
+      // no .ignore
+    }
+  }
+
+  if (config.readVcsignore) {
+    const gitignorePath = path.join(dirPath, '.gitignore');
+    try {
+      const content = fs.readFileSync(gitignorePath, 'utf-8');
+      patterns.push(...parseGitignore(content, dirPath));
+    } catch {
+      // no .gitignore
+    }
+  }
+
+  return patterns;
+}
+
+function isIgnoredByPattern(filePath, baseDir, patterns) {
+  const relativePath = path.relative(baseDir, filePath);
+  const basename = path.basename(filePath);
+
+  for (const pattern of patterns) {
+    if (pattern.regex.test(relativePath) || pattern.regex.test(basename)) {
+      if (pattern.negated) {
+        return false;
+      }
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isInGitRepo(dirPath) {
+  let current = dirPath;
+  while (current) {
+    if (fs.existsSync(path.join(current, '.git'))) {
+      return true;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return false;
+}
+
+function shouldSkipDir(dirPath, config, allPatterns) {
+  const basename = path.basename(dirPath);
+
+  if (!config.ignoreHidden && basename.startsWith('.')) {
+    return true;
+  }
+
+  if (config.ignoreContain && config.ignoreContain.length > 0) {
+    try {
+      const entries = fs.readdirSync(dirPath);
+      for (const marker of config.ignoreContain) {
+        if (entries.includes(marker)) {
+          return true;
+        }
+      }
+    } catch {
+      // can't read directory
+    }
+  }
+
+  if (allPatterns.length > 0) {
+    const baseDir = path.dirname(dirPath);
+    for (const pattern of allPatterns) {
+      if (isIgnoredByPattern(dirPath, baseDir, [pattern])) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function shouldSkipFile(filePath, config, allPatterns) {
+  const basename = path.basename(filePath);
+
+  if (!config.ignoreHidden && basename.startsWith('.')) {
+    return true;
+  }
+
+  if (allPatterns.length > 0) {
+    const baseDir = path.dirname(filePath);
+    for (const pattern of allPatterns) {
+      if (isIgnoredByPattern(filePath, baseDir, [pattern])) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function matchesPattern(filePath, pattern, config) {
+  if (!pattern || pattern === '') return true;
+
+  const basename = path.basename(filePath);
+  const searchStr = config.fullPathBase ? filePath : basename;
+
+  try {
+    return pattern.test(searchStr);
+  } catch {
+    return false;
+  }
+}
+
+function matchesExtensions(filePath, extensions) {
+  if (!extensions || extensions.length === 0) return true;
+
+  const ext = getExtension(filePath);
+  return extensions.some((e) => e.toLowerCase() === ext.toLowerCase());
+}
+
+function matchesFileTypes(filePath, stat, fileTypes) {
+  if (!fileTypes) return true;
+  return !fileTypes.shouldIgnore(filePath, stat);
+}
+
+function matchesSizeConstraints(stat, sizeConstraints) {
+  if (!sizeConstraints || sizeConstraints.length === 0) return true;
+  return sizeConstraints.every((f) => f.isWithin(stat.size));
+}
+
+function matchesTimeConstraints(stat, timeConstraints) {
+  if (!timeConstraints || timeConstraints.length === 0) return true;
+  return timeConstraints.every((f) => f.appliesTo(stat.mtime));
+}
+
+function buildPatterns(opts) {
+  const patterns = [];
+
+  if (opts.pattern) {
+    const patternStr = opts.glob ? globToRegex(opts.pattern) : opts.pattern;
+    try {
+      const flags = opts.caseSensitive ? '' : 'i';
+      patterns.push(new RegExp(patternStr, flags));
+    } catch {
+      process.stderr.write(`[fd error]: Invalid pattern: ${opts.pattern}\n`);
+      process.exit(1);
+    }
+  }
+
+  if (opts.exprs) {
+    for (const expr of opts.exprs) {
+      const patternStr = opts.glob ? globToRegex(expr) : expr;
+      try {
+        const flags = opts.caseSensitive ? '' : 'i';
+        patterns.push(new RegExp(patternStr, flags));
+      } catch {
+        process.stderr.write(`[fd error]: Invalid pattern: ${expr}\n`);
+        process.exit(1);
+      }
+    }
+  }
+
+  return patterns;
+}
+
+function searchDir(dirPath, config, patterns, depth, maxDepth, allPatterns, results) {
+  if (maxDepth !== undefined && depth > maxDepth) {
+    return;
+  }
+
+  let entries;
+  try {
+    entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch (err) {
+    if (config.showFilesystemErrors) {
+      printError(`Cannot read directory '${dirPath}': ${err.message}`);
+    }
+    return;
+  }
+
+  const entryDepth = depth + 1;
+  if (maxDepth !== undefined && entryDepth > maxDepth) {
+    return;
+  }
+
+  for (const entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
+
+    if (entry.name === '.' || entry.name === '..') {
+      continue;
+    }
+
+    if (!config.ignoreHidden && entry.name.startsWith('.')) {
+      continue;
+    }
+
+    if (config.ignoreContain && config.ignoreContain.length > 0 && entry.isDirectory()) {
+      try {
+        const subEntries = fs.readdirSync(fullPath);
+        let shouldSkip = false;
+        for (const marker of config.ignoreContain) {
+          if (subEntries.includes(marker)) {
+            shouldSkip = true;
+            break;
+          }
+        }
+        if (shouldSkip) continue;
+      } catch {
+        // can't read directory
+      }
+    }
+
+    let stat;
+    try {
+      if (config.followLinks && entry.isSymbolicLink()) {
+        stat = fs.statSync(fullPath);
+      } else {
+        stat = fs.lstatSync(fullPath);
+      }
+    } catch (err) {
+      if (config.showFilesystemErrors) {
+        printError(`Cannot stat '${fullPath}': ${err.message}`);
+      }
+      continue;
+    }
+
+    if (entry.isDirectory()) {
+      if (config.prune) {
+        continue;
+      }
+
+      const dirPatterns = loadIgnorePatterns(fullPath, config);
+      const combinedPatterns = [...allPatterns, ...dirPatterns];
+
+      if (shouldSkipDir(fullPath, config, combinedPatterns)) {
+        continue;
+      }
+
+      // Check if directory matches pattern and file type filter
+      if (config.minDepth === undefined || entryDepth >= config.minDepth) {
+        let matched = true;
+        for (const pattern of patterns) {
+          if (!matchesPattern(fullPath, pattern, config)) {
+            matched = false;
+            break;
+          }
+        }
+        if (matched && matchesExtensions(fullPath, config.extensions)) {
+          if (matchesFileTypes(fullPath, stat, config.fileTypes)) {
+            if (matchesSizeConstraints(stat, config.sizeConstraints)) {
+              if (matchesTimeConstraints(stat, config.timeConstraints)) {
+                results.push({ path: fullPath, stat, depth: entryDepth });
+                if (config.maxResults && results.length >= config.maxResults) return;
+              }
+            }
+          }
+        }
+      }
+
+      searchDir(fullPath, config, patterns, entryDepth, maxDepth, combinedPatterns, results);
+    } else if (entry.isFile() || (entry.isSymbolicLink() && config.followLinks)) {
+      if (shouldSkipFile(fullPath, config, allPatterns)) {
+        continue;
+      }
+
+      if (config.minDepth !== undefined && entryDepth < config.minDepth) {
+        continue;
+      }
+
+      let matched = true;
+
+      for (const pattern of patterns) {
+        if (!matchesPattern(fullPath, pattern, config)) {
+          matched = false;
+          break;
+        }
+      }
+
+      if (!matched) continue;
+
+      if (!matchesExtensions(fullPath, config.extensions)) continue;
+
+      if (!matchesFileTypes(fullPath, stat, config.fileTypes)) continue;
+
+      if (!matchesSizeConstraints(stat, config.sizeConstraints)) continue;
+
+      if (!matchesTimeConstraints(stat, config.timeConstraints)) continue;
+
+      results.push({ path: fullPath, stat, depth: entryDepth });
+
+      if (config.maxResults && results.length >= config.maxResults) {
+        return;
+      }
+    }
+  }
+}
+
+function scan(searchPaths, config, opts) {
+  const patterns = buildPatterns(opts);
+  const results = [];
+
+  const exitHandler = (code) => {
+    process.exit(code);
+  };
+
+  process.on('SIGINT', () => {
+    exitHandler(ExitCode.KilledBySigint);
+  });
+
+  for (const searchPath of searchPaths) {
+    const absPath = path.resolve(searchPath);
+    const basePatterns = loadIgnorePatterns(absPath, config);
+
+    searchDir(absPath, config, patterns, 0, config.maxDepth, basePatterns, results);
+
+    if (config.maxResults && results.length >= config.maxResults) {
+      break;
+    }
+  }
+
+  if (config.command) {
+    return executeCommand(results, config);
+  }
+
+  if (!config.quiet) {
+    for (const result of results) {
+      const filePath = config.stripCwdPrefix
+        ? result.path.replace(/^\.\//, '').replace(process.cwd() + '/', '')
+        : result.path;
+
+      printEntry(filePath, result.stat, {
+        ...config,
+        stripCwdPrefix: false,
+      });
+    }
+  }
+
+  return results.length > 0 ? ExitCode.Success : ExitCode.GeneralError;
+}
+
+async function executeCommand(results, config) {
+  const filePaths = results.map((r) => r.path);
+  const cmd = config.command;
+
+  if (config.command.mode === 'batch') {
+    const code = await cmd.executeBatch(
+      filePaths,
+      config.batchSize,
+      config.pathSeparator,
+      process.stdout,
+      process.stderr
+    );
+    return code === 0 ? ExitCode.Success : ExitCode.GeneralError;
+  }
+
+  let exitCode = ExitCode.Success;
+  const promises = [];
+
+  for (const filePath of filePaths) {
+    const promise = cmd.execute(filePath, config.pathSeparator, process.stdout, process.stderr);
+    promises.push(promise);
+
+    if (config.threads && config.threads === 1) {
+      const code = await promise;
+      if (code !== 0) exitCode = ExitCode.GeneralError;
+    }
+  }
+
+  if (config.threads !== 1) {
+    const codes = await Promise.all(promises);
+    for (const code of codes) {
+      if (code !== 0) exitCode = ExitCode.GeneralError;
+    }
+  }
+
+  return exitCode;
+}
+
+module.exports = { scan, searchDir, loadIgnorePatterns, parseGitignore, matchesPattern, matchesExtensions, matchesFileTypes, matchesSizeConstraints, matchesTimeConstraints };
+  };
+
+  // Module: index.js
+  moduleFactories['index'] = function(module, exports) {
+'use strict';
+
+const path = require('path');
+const { parseArgs, resolvePaths } = requireModule('cli');
+const { constructConfig } = requireModule('config');
+const { scan } = requireModule('walk');
+const { ExitCode, exit } = requireModule('exit_codes');
+const { printError } = requireModule('error');
+const { patternMatchesStringsWithLeadingDot } = requireModule('regex_helper');
+
+const VERSION = '10.4.2';
+
+function printHelp() {
+  const help = `
+fd - A simple, fast and user-friendly alternative to find.
+
+USAGE:
+    fd [OPTIONS] [PATTERN] [PATH...]
+
+OPTIONS:
+    -H, --hidden             Search hidden files and directories
+    -I, --no-ignore          Do not respect .(git|fd)ignore files
+    --no-ignore-vcs          Do not respect .gitignore files
+    --no-require-git         Do not require a git repository to respect gitignores
+    --no-ignore-parent       Do not respect .(git|fd)ignore files in parent directories
+    --no-global-ignore-file  Do not respect the global ignore file
+    -u, --unrestricted       Unrestricted search, alias for '--no-ignore --hidden'
+    -s, --case-sensitive     Perform a case-sensitive search
+    -i, --ignore-case        Case-insensitive search (default: smart case)
+    -g, --glob               Glob-based search (default: regular expression)
+    --regex                  Regular-expression based search (default)
+    -F, --fixed-strings      Treat pattern as literal string instead of regex
+    --exact                  Match the entire filename exactly (literal, non-substring)
+    --and <pattern>          Additional search patterns that need to be matched
+    -a, --absolute-path      Show absolute instead of relative paths
+    -l, --list-details       Use a long listing format with file metadata
+    -L, --follow             By default, fd does not descend into symlinked directories
+    -p, --full-path          Search full abs. path (default: filename only)
+    -0, --print0             Separate search results by the null character
+    -d, --max-depth <depth>  Set maximum search depth (default: none)
+    --min-depth <depth>      Only show search results starting at the given depth
+    --exact-depth <depth>    Only show search results at the exact given depth
+    -E, --exclude <glob>     Exclude entries that match the given glob pattern
+    --prune                  Do not traverse into directories that match the search criteria
+    -t, --type <filetype>    Filter by type: file (f), directory (d/dir), symlink (l), executable (x), empty (e), socket (s), pipe (p), char-device (c), block-device (b)
+    -e, --extension <ext>    Filter by extension
+    -S, --size <size>        Limit results based on the size of files
+    --changed-within <date|dur>  Filter by file modification time (newer than)
+    --changed-before <date|dur>  Filter by file modification time (older than)
+    -o, --owner <user:group> Filter by owning user and/or group
+    --format <fmt>           Print results according to template
+    -x, --exec <cmd>         Execute a command for each search result
+    -X, --exec-batch <cmd>   Execute a command with all search results at once
+    --batch-size <size>      Max number of arguments to run as a batch size with -X
+    --ignore-file <path>     Add a custom ignore-file in '.gitignore' format
+    -c, --color <when>       When to use colors: auto, always, never
+    --hyperlink <when>       Add hyperlinks to output paths
+    --ignore-contain <name>  Ignore directories containing the named entry
+    -j, --threads <num>      Set number of threads to use for searching & executing
+    --max-results <count>    Limit the number of search results
+    -1                       Limit search to a single result
+    -q, --quiet              Print nothing, exit code 0 if match found, 1 otherwise
+    --show-errors            Show filesystem errors
+    -C, --base-directory <path>  Change current working directory
+    --path-separator <sep>   Set path separator when printing file paths
+    --search-path <path>     Provides paths to search as an alternative to the positional <path> argument
+    --strip-cwd-prefix       By default, relative paths are prefixed with './'
+    --one-file-system        Do not descend into a different file system
+
+ARGS:
+    <PATTERN>  The search pattern (a regular expression, unless '--glob' is used; optional)
+    <PATH...>  The root directories for the filesystem search (optional)
+
+EXAMPLES:
+    Find all .py files in the current directory:
+        fd -e py
+
+    Find all files named 'foo':
+        fd foo
+
+    Find all files matching the regex '^[A-Z]':
+        fd '^[A-Z]'
+
+    Find all directories:
+        fd -td
+
+    Execute 'ls -l' for each search result:
+        fd -e log -x ls -l
+
+    Find all .js files and open them in vim:
+        fd -e js -X vim
+
+For more details, see: https://github.com/sharkdp/fd
+`;
+  process.stdout.write(help);
+}
+
+function printVersion() {
+  process.stdout.write(`fd ${VERSION}\n`);
+}
+
+function run() {
+  const opts = parseArgs(process.argv);
+
+  if (opts.help) { printHelp(); exit(ExitCode.Success); return; }
+  if (opts.version) { printVersion(); exit(ExitCode.Success); return; }
+
+  if (opts.baseDirectory) {
+    const fs = require('fs');
+    try {
+      const stat = fs.statSync(opts.baseDirectory);
+      if (!stat.isDirectory()) {
+        printError(`The '--base-directory' path '${opts.baseDirectory}' is not a directory.`);
+        exit(ExitCode.GeneralError);
+        return;
+      }
+      process.chdir(opts.baseDirectory);
+    } catch (err) {
+      printError(`Could not set '${opts.baseDirectory}' as the current working directory: ${err.message}`);
+      exit(ExitCode.GeneralError);
+      return;
+    }
+  }
+
+  const searchPaths = resolvePaths(opts);
+  if (searchPaths.length === 0) {
+    printError('No valid search paths given.');
+    exit(ExitCode.GeneralError);
+    return;
+  }
+
+  if (!opts.fullPath && opts.pattern && opts.pattern.includes('/')) {
+    printError(
+      `The search pattern '${opts.pattern}' contains a path-separation character ` +
+      `and will not lead to any search results.\n\n` +
+      `If you want to search for all files inside the '${opts.pattern}' directory, use a match-all pattern:\n\n  ` +
+      `fd . '${opts.pattern}'\n\n` +
+      `Instead, if you want your pattern to match the full file path, use:\n\n  ` +
+      `fd --full-path '${opts.pattern}'`
+    );
+    exit(ExitCode.GeneralError);
+    return;
+  }
+
+  const config = constructConfig(opts);
+
+  if (
+    !config.ignoreHidden &&
+    opts.pattern &&
+    patternMatchesStringsWithLeadingDot(opts.pattern)
+  ) {
+    printError(
+      "The pattern(s) seems to only match files with a leading dot, but hidden files are " +
+      "filtered by default. Consider adding -H/--hidden to search hidden files as well " +
+      "or adjust your search pattern(s)."
+    );
+    exit(ExitCode.GeneralError);
+    return;
+  }
+
+  const exitCode = scan(searchPaths, config, opts);
+  exit(exitCode);
+}
+
+function main() {
+  try {
+    run();
+  } catch (err) {
+    printError(err.message || String(err));
+    exit(ExitCode.GeneralError);
+  }
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = { run, main };
+  };
+
+// ============================================================
+// Boot the application
+// ============================================================
+const mainModule = requireModule('index');
+if (mainModule.main) {
+  mainModule.main();
+}
+

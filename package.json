@@ -1,12 +1,13 @@
 {
     "name": "pi-coding-agent",
-    "version": "0.79.8",
+    "version": "0.79.10",
     "type": "module",
     "scripts": {
+      "build:jsos-app": "zip -r pi-coding-agent.zip bin/ cli.sh icon.svg package.json README.md",
       "git:tag": "node -e \"const v=require('./package.json').version;const{execSync}=require('child_process');execSync('git tag v'+v+' && git push origin v'+v,{stdio:'inherit'});console.log('Tagged and pushed v'+v)\""
     },
     "dependencies": {
-  		"@earendil-works/pi-coding-agent": "0.79.8"
+  		"@earendil-works/pi-coding-agent": "0.79.10"
   	},
    "repository": {
      "type": "git",

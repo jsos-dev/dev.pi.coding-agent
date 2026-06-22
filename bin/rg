@@ -1,0 +1,36 @@
+#!/usr/bin/env node
+// rg.js - ripgrep WASM wrapper for Node.js
+// Usage: node rg.js [rg-options] <pattern> [path]
+//
+// Examples:
+//   node rg.js -i test /
+//   node rg.js --debug "pattern" /data
+//   node rg.js -C 3 "func" /src
+
+const { spawn } = require('child_process');
+const path = require('path');
+
+// 获取脚本所在目录
+const scriptDir = path.dirname(process.argv[1]);
+
+// 构建参数：wasm --mapdir /:/ <rg.wasm路径> -- <用户参数>
+const args = [
+    '--mapdir', '/:/',
+    path.join(scriptDir, 'rg.wasm'),
+    '--',
+    ...process.argv.slice(2)  // 透传所有用户参数
+];
+
+const child = spawn('wasm', args, {
+    stdio: 'inherit',  // 继承 stdin/stdout/stderr
+    shell: false
+});
+
+child.on('error', (err) => {
+    console.error('Failed to start rg.wasm:', err.message);
+    process.exit(1);
+});
+
+child.on('exit', (code) => {
+    process.exit(code || 0);
+});
