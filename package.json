@@ -3,7 +3,7 @@
     "version": "0.79.10",
     "type": "module",
     "scripts": {
-      "build:jsos-app": "zip -r pi-coding-agent.zip bin/ cli.sh icon.svg package.json README.md",
+      "build:jsos-app": "zip -r pi-coding-agent.zip bin/ cli.sh icon.svg package.json README.md patch.js",
       "git:tag": "node -e \"const v=require('./package.json').version;const{execSync}=require('child_process');execSync('git tag v'+v+' && git push origin v'+v,{stdio:'inherit'});console.log('Tagged and pushed v'+v)\""
     },
     "dependencies": {

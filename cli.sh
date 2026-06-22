@@ -17,9 +17,10 @@ chmod +x $PI_BIN_PATH/rg
 echo "OK"
 
 echo "Applying patch..."
-SDK_JS="./node_modules/@earendil-works/pi-coding-agent/dist/core/sdk.js"
-echo '\nexport { AgentSessionRuntime, createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices } from "./agent-session-runtime.js";' >> $SDK_JS
+node patch.js
 chmod +x ./node_modules/.bin/*
 
 echo "Execution complete. Starting up..."
+clear
+
 cd $DATA_DIR && PATH="$PATH:$APP_DIR/node_modules/.bin" HOME="$DATA_DIR" pi
