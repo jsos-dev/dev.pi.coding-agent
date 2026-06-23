@@ -16,7 +16,7 @@ jobs:
       - id: version
         run: echo "version=$(node -p 'require("./package.json").version')" >> $GITHUB_OUTPUT
 
-      - run: zip -r dev.pi.coding-agent-v${{ steps.version.outputs.version }}.zip cli.sh icon.svg package.json README.md
+      - run: zip -r dev.pi.coding-agent-v${{ steps.version.outputs.version }}.zip bin/ cli.sh icon.svg package.json patch.js README.md
 
       - uses: softprops/action-gh-release@v2
         with:
