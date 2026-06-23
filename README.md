@@ -26,6 +26,6 @@ PI官方原版更新频繁，为了避免更新后导致现有的“补丁”失
 ## 适配工作
 1. `node_modules/@earendil-works/pi-coding-agent/dist/core/sdk.js`文件中的`export *`语法在`Webcontainer`环境（nodejs v22.22.3）不适用，遂更新为：`export { AgentSessionRuntime, createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices } from "./agent-session-runtime.js";`
 
-2. fd工具（https://github.com/sharkdp/fd），使用nodejs重写了：https://github.com/jsos-dev/node-fd
+2. [fd](https://github.com/sharkdp/fd)工具，使用nodejs重写了：https://github.com/jsos-dev/node-fd
 
-3. ripgrep工具（https://github.com/BurntSushi/ripgrep）：编译为了`wasm`，并在webcontainer中成功使用`wasm --mapdir /:/ rg.wasm -- -arg value`执行
+3. [ripgrep](https://github.com/BurntSushi/ripgrep)工具：编译为了`wasm`，并在webcontainer中成功使用`wasm --mapdir /:/ rg.wasm -- -arg value`执行
